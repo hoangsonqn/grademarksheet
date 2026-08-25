@@ -28,6 +28,8 @@ Giáo viên tải lên file `.xlsx` hoặc `.csv` có 2 cột đầu tiên là *
 **Họ tên**; hàng tiêu đề có thể có hoặc không. STT phải là số và không được trùng.
 Hệ thống tự coi các dạng như `01` và `1` là cùng một STT. Bài làm có STT không tồn
 tại trong danh sách vẫn được chấm nhưng sẽ để trống họ tên và ghi cảnh báo.
+Học viên có trong danh sách nhưng không có bài làm vẫn được giữ trong kết quả;
+các cột điểm để trống và trạng thái là **KHÔNG THAM GIA TEST**.
 
 ### Triển khai cục bộ:
 ```bash

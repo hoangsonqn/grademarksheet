@@ -16,6 +16,7 @@ TEMPLATE_PATH = BASE_DIR / "template.json"
 MARKS_AVAILABLE = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]
 QUESTIONS_PER_MARK = 80
 VALID_ANSWERS = {"A", "B", "C", "D"}
+NOT_PARTICIPATED_STATUS = "KHÔNG THAM GIA TEST"
 
 @st.cache_data
 def load_default_template():
@@ -161,6 +162,50 @@ def load_student_roster(file_name, file_bytes):
     if not roster:
         raise ValueError("Danh sách lớp không có học viên hợp lệ.")
     return roster
+
+def include_absent_students(results, student_roster):
+    """Return class-ordered results, including students without a test page."""
+    participating_numbers = {
+        normalize_student_number(result.get("stt"))
+        for result in results
+        if result.get("participated", True)
+    }
+    merged_results = list(results)
+
+    for student_number, student_name in student_roster.items():
+        if student_number in participating_numbers:
+            continue
+        merged_results.append({
+            "page": "",
+            "stt": student_number,
+            "student_name": student_name,
+            "made": "",
+            "dung": None,
+            "sai": None,
+            "bo_trong": None,
+            "khong_hop_le": None,
+            "diem": None,
+            "error": None,
+            "roster_note": NOT_PARTICIPATED_STATUS,
+            "ok": False,
+            "name_crop": None,
+            "participated": False,
+        })
+
+    roster_order = {
+        student_number: index
+        for index, student_number in enumerate(student_roster)
+    }
+
+    def result_order(result):
+        student_number = normalize_student_number(result.get("stt"))
+        page = result.get("page")
+        page_order = page if isinstance(page, int) else float("inf")
+        if student_number in roster_order:
+            return 0, roster_order[student_number], page_order
+        return 1, len(roster_order), page_order
+
+    return sorted(merged_results, key=result_order)
 
 DARK_THRESHOLD = 215
 MIN_GAP_TO_2ND = 18
@@ -311,10 +356,15 @@ def export_excel(results, out_path):
         ws.cell(row=i, column=3, value=r["stt"] if r["stt"] is not None else "")
         ws.cell(row=i, column=4, value=r.get("student_name", ""))
         ws.cell(row=i, column=5, value=r["made"] if r["made"] else "")
-        ws.cell(row=i, column=6, value=r["dung"])
-        ws.cell(row=i, column=7, value=r["sai"])
-        ws.cell(row=i, column=8, value=r["bo_trong"] + r["khong_hop_le"])
-        ws.cell(row=i, column=9, value=r["diem"])
+        participated = r.get("participated", True)
+        ws.cell(row=i, column=6, value=r["dung"] if participated else None)
+        ws.cell(row=i, column=7, value=r["sai"] if participated else None)
+        ws.cell(
+            row=i,
+            column=8,
+            value=(r["bo_trong"] + r["khong_hop_le"]) if participated else None,
+        )
+        ws.cell(row=i, column=9, value=r["diem"] if participated else None)
         notes = [r.get("error"), r.get("roster_note")]
         ws.cell(row=i, column=10, value="; ".join(note for note in notes if note))
 
@@ -436,6 +486,7 @@ if st.button("🚀 Bắt đầu chấm điểm", type="primary"):
 
             res = grade_page(img, template, answer_key, n_questions)
             res["page"] = i + 1
+            res["participated"] = True
             normalized_stt = normalize_student_number(res["stt"])
             res["student_name"] = (
                 student_roster.get(normalized_stt, "")
@@ -454,32 +505,51 @@ if st.button("🚀 Bắt đầu chấm điểm", type="primary"):
 
         doc.close()
         os.remove(tmp_pdf_path)
+
+        results = include_absent_students(results, student_roster)
+
         out_excel = "ket_qua_cham.xlsx"
         export_excel(results, out_excel)
         status_text.success("✅ Đã hoàn tất chấm điểm!")
 
         summary_data = []
         for r in results:
+            participated = r.get("participated", True)
             summary_data.append({
                 "Trang": r["page"],
                 "STT": r["stt"] or "Không nhận diện được",
                 "Họ và tên": r.get("student_name", "") or "Không tìm thấy",
-                "Mã đề": r["made"] or "-",
-                "Số câu đúng": r["dung"],
-                "Số câu sai": r["sai"],
-                "Lỗi/Trống": r["bo_trong"] + r["khong_hop_le"],
-                "Điểm": r["diem"],
+                "Mã đề": (r["made"] or "-") if participated else "",
+                "Số câu đúng": r["dung"] if participated else None,
+                "Số câu sai": r["sai"] if participated else None,
+                "Lỗi/Trống": (
+                    r["bo_trong"] + r["khong_hop_le"]
+                    if participated else None
+                ),
+                "Điểm": r["diem"] if participated else None,
                 "Trạng thái": (
                     r["error"] or r.get("roster_note") or "Thành công"
                 )
             })
         st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
 
-        unmatched_count = sum(1 for r in results if r.get("roster_note"))
+        unmatched_count = sum(
+            1 for r in results
+            if r.get("participated", True) and r.get("roster_note")
+        )
         if unmatched_count:
             st.warning(
                 f"Có {unmatched_count} bài không tìm thấy STT tương ứng "
                 "trong danh sách lớp."
+            )
+
+        absent_count = sum(
+            1 for r in results if not r.get("participated", True)
+        )
+        if absent_count:
+            st.info(
+                f"Có {absent_count} học viên được ghi nhận "
+                f"**{NOT_PARTICIPATED_STATUS}**."
             )
 
         with open(out_excel, "rb") as f:
