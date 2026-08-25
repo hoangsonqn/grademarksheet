@@ -1,3 +1,4 @@
+import io
 import json, tempfile, os
 from pathlib import Path
 import streamlit as st
@@ -87,6 +88,79 @@ def load_answer_config():
         all_keys[mark] = answer_key
 
     return all_keys, instructions
+
+def normalize_student_number(value):
+    """Normalize roster/OMR numbers so values such as 01 and 1 match."""
+    if value is None or pd.isna(value):
+        return None
+
+    text = str(value).strip()
+    if text.isdigit():
+        return str(int(text))
+    if text.endswith(".0") and text[:-2].isdigit():
+        return str(int(text[:-2]))
+    return None
+
+@st.cache_data
+def load_student_roster(file_name, file_bytes):
+    """Read a two-column roster and return a normalized STT-to-name mapping."""
+    suffix = Path(file_name).suffix.lower()
+    source = io.BytesIO(file_bytes)
+
+    if suffix == ".xlsx":
+        df = pd.read_excel(source, header=None, dtype=str)
+    elif suffix == ".csv":
+        df = None
+        for encoding in ("utf-8-sig", "utf-8", "cp1258"):
+            try:
+                source.seek(0)
+                df = pd.read_csv(
+                    source,
+                    header=None,
+                    dtype=str,
+                    encoding=encoding,
+                    sep=None,
+                    engine="python",
+                    keep_default_na=False,
+                )
+                break
+            except UnicodeDecodeError:
+                continue
+        if df is None:
+            raise ValueError("File CSV phải dùng bảng mã UTF-8 hoặc Windows-1258.")
+    else:
+        raise ValueError("Danh sách lớp phải là file .xlsx hoặc .csv.")
+
+    if df.shape[1] < 2:
+        raise ValueError("Danh sách lớp phải có 2 cột: Số thứ tự và Họ tên.")
+
+    roster = {}
+    for row_index, row in df.iloc[:, :2].iterrows():
+        raw_number = "" if pd.isna(row.iloc[0]) else str(row.iloc[0]).strip()
+        student_name = "" if pd.isna(row.iloc[1]) else str(row.iloc[1]).strip()
+
+        if not raw_number and not student_name:
+            continue
+
+        student_number = normalize_student_number(raw_number)
+        if student_number is None:
+            header_text = f"{raw_number} {student_name}".lower()
+            header_tokens = (
+                "stt", "số tt", "số thứ tự", "họ tên", "họ và tên", "name"
+            )
+            if not roster and any(token in header_text for token in header_tokens):
+                continue
+            raise ValueError(f"STT không hợp lệ tại dòng {row_index + 1}: {raw_number!r}.")
+
+        if not student_name:
+            raise ValueError(f"Thiếu họ tên tại dòng {row_index + 1}.")
+        if student_number in roster:
+            raise ValueError(f"STT {raw_number} bị trùng trong danh sách lớp.")
+        roster[student_number] = student_name
+
+    if not roster:
+        raise ValueError("Danh sách lớp không có học viên hợp lệ.")
+    return roster
 
 DARK_THRESHOLD = 215
 MIN_GAP_TO_2ND = 18
@@ -211,7 +285,7 @@ def export_excel(results, out_path):
     wb = Workbook()
     ws = wb.active
     ws.title = "Ket qua"
-    headers = ["Trang", "Ảnh (Tên/Lớp)", "STT", "Mã đề", "Số câu đúng", "Số câu sai", "Bỏ trống/Lỗi", "Điểm (/100)", "Ghi chú"]
+    headers = ["Trang", "Ảnh (Tên/Lớp)", "STT", "Họ và tên", "Mã đề", "Số câu đúng", "Số câu sai", "Bỏ trống/Lỗi", "Điểm (/100)", "Ghi chú"]
     ws.append(headers)
     for c in range(1, len(headers) + 1):
         cell = ws.cell(row=1, column=c)
@@ -222,24 +296,27 @@ def export_excel(results, out_path):
     ws.column_dimensions["A"].width = 8
     ws.column_dimensions["B"].width = 42
     ws.column_dimensions["C"].width = 12
-    ws.column_dimensions["D"].width = 10
-    ws.column_dimensions["E"].width = 12
+    ws.column_dimensions["D"].width = 32
+    ws.column_dimensions["E"].width = 10
     ws.column_dimensions["F"].width = 12
-    ws.column_dimensions["G"].width = 15
-    ws.column_dimensions["H"].width = 12
-    ws.column_dimensions["I"].width = 30
+    ws.column_dimensions["G"].width = 12
+    ws.column_dimensions["H"].width = 15
+    ws.column_dimensions["I"].width = 12
+    ws.column_dimensions["J"].width = 38
 
     tmp_files = []
     for i, r in enumerate(results, start=2):
         ws.row_dimensions[i].height = 70
         ws.cell(row=i, column=1, value=r["page"])
         ws.cell(row=i, column=3, value=r["stt"] if r["stt"] is not None else "")
-        ws.cell(row=i, column=4, value=r["made"] if r["made"] else "")
-        ws.cell(row=i, column=5, value=r["dung"])
-        ws.cell(row=i, column=6, value=r["sai"])
-        ws.cell(row=i, column=7, value=r["bo_trong"] + r["khong_hop_le"])
-        ws.cell(row=i, column=8, value=r["diem"])
-        ws.cell(row=i, column=9, value=r["error"] or "")
+        ws.cell(row=i, column=4, value=r.get("student_name", ""))
+        ws.cell(row=i, column=5, value=r["made"] if r["made"] else "")
+        ws.cell(row=i, column=6, value=r["dung"])
+        ws.cell(row=i, column=7, value=r["sai"])
+        ws.cell(row=i, column=8, value=r["bo_trong"] + r["khong_hop_le"])
+        ws.cell(row=i, column=9, value=r["diem"])
+        notes = [r.get("error"), r.get("roster_note")]
+        ws.cell(row=i, column=10, value="; ".join(note for note in notes if note))
 
         if r["name_crop"] is not None:
             fd, tmp_path = tempfile.mkstemp(suffix=".png")
@@ -291,11 +368,35 @@ with st.sidebar:
     if selected_instruction:
         st.info(f"📌 **Hướng dẫn:** {selected_instruction}")
 
+    st.divider()
+    roster_file = st.file_uploader(
+        "👥 Tải danh sách lớp",
+        type=["xlsx", "csv"],
+        help="File gồm 2 cột: Số thứ tự và Họ tên. Có thể có hàng tiêu đề.",
+    )
+    student_roster = {}
+    roster_error = None
+    if roster_file is not None:
+        try:
+            student_roster = load_student_roster(
+                roster_file.name,
+                roster_file.getvalue(),
+            )
+        except (ValueError, OSError) as exc:
+            roster_error = str(exc)
+            st.error(f"Không thể đọc danh sách lớp: {roster_error}")
+        else:
+            st.success(f"Đã nạp **{len(student_roster)} học viên**")
+
 pdf_file = st.file_uploader("📥 Tải lên file PDF bài làm", type=["pdf"])
 
 if st.button("🚀 Bắt đầu chấm điểm", type="primary"):
     if not pdf_file:
         st.error("Vui lòng tải lên file PDF bài làm.")
+    elif roster_file is None:
+        st.error("Vui lòng tải lên danh sách lớp.")
+    elif roster_error:
+        st.error("Danh sách lớp chưa hợp lệ. Vui lòng sửa file và tải lại.")
     elif not answer_key:
         st.error(
             f"Không tìm thấy đáp án cho mốc {selected_mark}. "
@@ -335,6 +436,17 @@ if st.button("🚀 Bắt đầu chấm điểm", type="primary"):
 
             res = grade_page(img, template, answer_key, n_questions)
             res["page"] = i + 1
+            normalized_stt = normalize_student_number(res["stt"])
+            res["student_name"] = (
+                student_roster.get(normalized_stt, "")
+                if normalized_stt is not None
+                else ""
+            )
+            res["roster_note"] = ""
+            if normalized_stt is not None and not res["student_name"]:
+                res["roster_note"] = (
+                    f"Không tìm thấy STT {res['stt']} trong danh sách lớp"
+                )
             results.append(res)
             
             progress_bar.progress((i + 1) / total_pages)
@@ -351,14 +463,24 @@ if st.button("🚀 Bắt đầu chấm điểm", type="primary"):
             summary_data.append({
                 "Trang": r["page"],
                 "STT": r["stt"] or "Không nhận diện được",
+                "Họ và tên": r.get("student_name", "") or "Không tìm thấy",
                 "Mã đề": r["made"] or "-",
                 "Số câu đúng": r["dung"],
                 "Số câu sai": r["sai"],
                 "Lỗi/Trống": r["bo_trong"] + r["khong_hop_le"],
                 "Điểm": r["diem"],
-                "Trạng thái": "Thành công" if r["ok"] else r["error"]
+                "Trạng thái": (
+                    r["error"] or r.get("roster_note") or "Thành công"
+                )
             })
         st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
+
+        unmatched_count = sum(1 for r in results if r.get("roster_note"))
+        if unmatched_count:
+            st.warning(
+                f"Có {unmatched_count} bài không tìm thấy STT tương ứng "
+                "trong danh sách lớp."
+            )
 
         with open(out_excel, "rb") as f:
             st.download_button("📥 Tải về file Excel kết quả chi tiết", data=f, file_name="Ket_qua_cham_trac_nghiem.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

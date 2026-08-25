@@ -7,6 +7,7 @@
 - Nhận diện Số thứ tự (2 chữ số) và Mã đề.
 - Chọn nhanh mốc đề từ 5 đến 50; mỗi mốc có một bộ đáp án 80 câu trong `answers.json`.
 - Tự động lấy 80 câu từ bộ đáp án của mốc đã chọn, không cần nhập thủ công.
+- Ghép STT nhận diện trên bài làm với danh sách lớp Excel/CSV và xuất kèm họ tên.
 - Xuất file Excel đính kèm ảnh cắt phần tên/lớp viết tay để đối chiếu.
 
 ### Cấu hình đáp án:
@@ -20,6 +21,13 @@ sẽ tự động xuất hiện trên sidebar khi giáo viên chọn mốc tươ
 
 Hiện tại đã có đáp án chính thức cho các mốc 5, 10 và 15. Các mốc chưa được cấu hình sẽ bị
 khóa chấm và hiển thị cảnh báo trên giao diện.
+
+### Danh sách lớp:
+
+Giáo viên tải lên file `.xlsx` hoặc `.csv` có 2 cột đầu tiên là **Số thứ tự** và
+**Họ tên**; hàng tiêu đề có thể có hoặc không. STT phải là số và không được trùng.
+Hệ thống tự coi các dạng như `01` và `1` là cùng một STT. Bài làm có STT không tồn
+tại trong danh sách vẫn được chấm nhưng sẽ để trống họ tên và ghi cảnh báo.
 
 ### Triển khai cục bộ:
 ```bash
