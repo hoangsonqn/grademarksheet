@@ -1,4 +1,5 @@
 import json, tempfile, os
+from pathlib import Path
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,10 +9,84 @@ from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Font, Alignment, PatternFill
 
+BASE_DIR = Path(__file__).resolve().parent
+ANSWER_KEYS_PATH = BASE_DIR / "answers.json"
+TEMPLATE_PATH = BASE_DIR / "template.json"
+MARKS_AVAILABLE = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]
+QUESTIONS_PER_MARK = 80
+VALID_ANSWERS = {"A", "B", "C", "D"}
+
 @st.cache_data
 def load_default_template():
-    with open("template.json", "r", encoding="utf-8") as f:
+    with TEMPLATE_PATH.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+@st.cache_data
+def load_answer_config():
+    """Load and validate answer keys and per-mark instructions once."""
+    if not ANSWER_KEYS_PATH.exists():
+        return {}, {}
+
+    with ANSWER_KEYS_PATH.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if not isinstance(data, dict):
+        raise ValueError("Nội dung answers.json phải là một object JSON.")
+
+    raw_instructions = data.get("_instructions", {})
+    if not isinstance(raw_instructions, dict):
+        raise ValueError("Mục _instructions trong answers.json phải là một object JSON.")
+
+    instructions = {}
+    for mark_text, raw_instruction in raw_instructions.items():
+        try:
+            mark = int(mark_text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Mốc hướng dẫn không hợp lệ: {mark_text!r}.") from exc
+
+        instruction = str(raw_instruction).strip()
+        if not instruction:
+            raise ValueError(f"Hướng dẫn của mốc {mark} không được để trống.")
+        instructions[mark] = instruction
+
+    all_keys = {}
+    for mark_text, raw_key in data.items():
+        if mark_text == "_instructions":
+            continue
+
+        try:
+            mark = int(mark_text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Mốc câu hỏi không hợp lệ: {mark_text!r}.") from exc
+
+        if not isinstance(raw_key, dict):
+            raise ValueError(f"Đáp án mốc {mark} phải là một object JSON.")
+
+        answer_key = {}
+        for question_text, raw_answer in raw_key.items():
+            try:
+                question = int(question_text)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Số câu {question_text!r} tại mốc {mark} không hợp lệ."
+                ) from exc
+
+            answer = str(raw_answer).strip().upper()
+            if answer not in VALID_ANSWERS:
+                raise ValueError(
+                    f"Đáp án câu {question} tại mốc {mark} phải là A, B, C hoặc D."
+                )
+            answer_key[question] = answer
+
+        expected_questions = set(range(1, QUESTIONS_PER_MARK + 1))
+        if set(answer_key) != expected_questions:
+            raise ValueError(
+                f"Mốc {mark} phải có đủ và đúng {QUESTIONS_PER_MARK} câu "
+                f"từ 1 đến {QUESTIONS_PER_MARK}."
+            )
+        all_keys[mark] = answer_key
+
+    return all_keys, instructions
 
 DARK_THRESHOLD = 215
 MIN_GAP_TO_2ND = 18
@@ -185,24 +260,61 @@ def export_excel(results, out_path):
 st.set_page_config(page_title="Chấm Thi Trắc Nghiệm Tự Động", layout="wide")
 st.title("📝 Hệ Thống Chấm Điểm Trắc Nghiệm Tự Động")
 
+try:
+    all_keys, all_instructions = load_answer_config()
+    answer_keys_error = None
+except (OSError, json.JSONDecodeError, ValueError) as exc:
+    all_keys = {}
+    all_instructions = {}
+    answer_keys_error = str(exc)
+
 with st.sidebar:
-    st.header("⚙️ Cấu hình đề thi")
-    ans_file = st.file_uploader("File đáp án (Excel/CSV)", type=["xlsx", "csv"])
-    n_questions_input = st.number_input("Số câu hỏi bài thi", min_value=1, max_value=120, value=80)
+    st.header("⚙️ Cấu hình chấm bài")
+    selected_mark = st.selectbox(
+        "🎯 Chọn mốc đề",
+        MARKS_AVAILABLE,
+        index=0,
+    )
+    answer_key = all_keys.get(selected_mark, {})
+    selected_instruction = all_instructions.get(selected_mark)
+
+    if answer_keys_error:
+        st.error(f"Không thể đọc answers.json: {answer_keys_error}")
+    elif answer_key:
+        st.success(
+            f"Đã nạp đáp án mốc **{selected_mark}**: "
+            f"**{len(answer_key)} câu**"
+        )
+    else:
+        st.warning(f"Chưa có dữ liệu đáp án cho mốc {selected_mark}.")
+
+    if selected_instruction:
+        st.info(f"📌 **Hướng dẫn:** {selected_instruction}")
 
 pdf_file = st.file_uploader("📥 Tải lên file PDF bài làm", type=["pdf"])
 
 if st.button("🚀 Bắt đầu chấm điểm", type="primary"):
-    if not pdf_file or not ans_file:
-        st.error("Vui lòng tải lên cả file PDF bài làm và file đáp án.")
+    if not pdf_file:
+        st.error("Vui lòng tải lên file PDF bài làm.")
+    elif not answer_key:
+        st.error(
+            f"Không tìm thấy đáp án cho mốc {selected_mark}. "
+            "Vui lòng kiểm tra lại answers.json."
+        )
     else:
-        df_ans = pd.read_csv(ans_file, header=None) if ans_file.name.endswith(".csv") else pd.read_excel(ans_file, header=0)
-        df_ans = df_ans.iloc[:, :2].dropna()
-        df_ans.columns = ["cau", "dapan"]
-        answer_key = {int(r["cau"]): str(r["dapan"]).strip().upper() for _, r in df_ans.iterrows() if str(r["dapan"]).strip().upper() in ("A","B","C","D")}
-
         template = load_default_template()
-        n_questions = n_questions_input or max(answer_key.keys())
+        n_questions = len(answer_key)
+
+        missing_template_questions = [
+            q for q in range(1, n_questions + 1)
+            if str(q) not in template.get("questions", {})
+        ]
+        if missing_template_questions:
+            st.error(
+                "Template phiếu thiếu tọa độ cho các câu: "
+                + ", ".join(map(str, missing_template_questions))
+            )
+            st.stop()
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
             tmp_pdf.write(pdf_file.read())
@@ -228,6 +340,7 @@ if st.button("🚀 Bắt đầu chấm điểm", type="primary"):
             progress_bar.progress((i + 1) / total_pages)
             status_text.text(f"Đang chấm trang {i + 1}/{total_pages}...")
 
+        doc.close()
         os.remove(tmp_pdf_path)
         out_excel = "ket_qua_cham.xlsx"
         export_excel(results, out_excel)
