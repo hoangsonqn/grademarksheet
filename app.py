@@ -13,6 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent
 ANSWER_KEYS_PATH = BASE_DIR / "answers.json"
 TEMPLATE_PATH = BASE_DIR / "template.json"
 MARKS_AVAILABLE = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]
+QUESTIONS_PER_MARK = 80
 VALID_ANSWERS = {"A", "B", "C", "D"}
 
 @st.cache_data
@@ -21,10 +22,10 @@ def load_default_template():
         return json.load(f)
 
 @st.cache_data
-def load_all_answer_keys():
-    """Load and validate every configured answer key once per app process."""
+def load_answer_config():
+    """Load answer keys and optional per-mark instructions once."""
     if not ANSWER_KEYS_PATH.exists():
-        return {}
+        return {}, {}
 
     with ANSWER_KEYS_PATH.open("r", encoding="utf-8") as f:
         data = json.load(f)
@@ -32,8 +33,27 @@ def load_all_answer_keys():
     if not isinstance(data, dict):
         raise ValueError("Nội dung answers.json phải là một object JSON.")
 
+    raw_instructions = data.get("_instructions", {})
+    if not isinstance(raw_instructions, dict):
+        raise ValueError("Mục _instructions trong answers.json phải là một object JSON.")
+
+    instructions = {}
+    for mark_text, raw_instruction in raw_instructions.items():
+        try:
+            mark = int(mark_text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Mốc hướng dẫn không hợp lệ: {mark_text!r}.") from exc
+
+        instruction = str(raw_instruction).strip()
+        if instruction:
+            instructions[mark] = instruction
+
     all_keys = {}
     for mark_text, raw_key in data.items():
+        # Các khóa bắt đầu bằng '_' là metadata, không phải mốc đề.
+        if str(mark_text).startswith("_"):
+            continue
+
         try:
             mark = int(mark_text)
         except (TypeError, ValueError) as exc:
@@ -58,14 +78,15 @@ def load_all_answer_keys():
                 )
             answer_key[question] = answer
 
-        expected_questions = set(range(1, mark + 1))
+        expected_questions = set(range(1, QUESTIONS_PER_MARK + 1))
         if set(answer_key) != expected_questions:
             raise ValueError(
-                f"Mốc {mark} phải có đủ và đúng các câu từ 1 đến {mark}."
+                f"Mốc {mark} phải có đủ và đúng {QUESTIONS_PER_MARK} câu "
+                f"từ 1 đến {QUESTIONS_PER_MARK}."
             )
         all_keys[mark] = answer_key
 
-    return all_keys
+    return all_keys, instructions
 
 DARK_THRESHOLD = 215
 MIN_GAP_TO_2ND = 18
@@ -240,27 +261,35 @@ st.set_page_config(page_title="Chấm Thi Trắc Nghiệm Tự Động", layout=
 st.title("📝 Hệ Thống Chấm Điểm Trắc Nghiệm Tự Động")
 
 try:
-    all_keys = load_all_answer_keys()
+    all_keys, all_instructions = load_answer_config()
     answer_keys_error = None
 except (OSError, json.JSONDecodeError, ValueError) as exc:
     all_keys = {}
+    all_instructions = {}
     answer_keys_error = str(exc)
 
 with st.sidebar:
     st.header("⚙️ Cấu hình chấm bài")
     selected_mark = st.selectbox(
-        "🎯 Chọn mốc bài thi ",
+        "🎯 Chọn mốc đề",
         MARKS_AVAILABLE,
-        index=5,
+        index=0,
     )
     answer_key = all_keys.get(selected_mark, {})
+    selected_instruction = all_instructions.get(selected_mark)
 
     if answer_keys_error:
         st.error(f"Không thể đọc answers.json: {answer_keys_error}")
     elif answer_key:
-        st.success(f"Đã nạp bộ đáp án: **{len(answer_key)} câu**")
+        st.success(
+            f"Đã nạp đáp án mốc **{selected_mark}**: "
+            f"**{len(answer_key)} câu**"
+        )
     else:
-        st.warning(f"Chưa có dữ liệu đáp án cho mốc {selected_mark} câu.")
+        st.warning(f"Chưa có dữ liệu đáp án cho mốc {selected_mark}.")
+
+    if selected_instruction:
+        st.info(f"📌 **Hướng dẫn:** {selected_instruction}")
 
 pdf_file = st.file_uploader("📥 Tải lên file PDF bài làm", type=["pdf"])
 
